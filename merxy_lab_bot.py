@@ -379,7 +379,7 @@ async def handle_payment_image(update: Update, context: ContextTypes.DEFAULT_TYP
 
         try:
             amount_value = float(amount_str)
-            if amount_value <= 5000:
+            if amount_value < 5000:
                 await update.message.reply_text(
                     "⚠️ Payment amount must be more than 5000 Ks.\n"
                     f"Your amount: {amount_value:.0f} Ks"
