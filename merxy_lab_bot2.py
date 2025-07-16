@@ -13,7 +13,7 @@ import boto3
 import os
 import creds
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from boto3.dynamodb.conditions import Key, Attr
 import platform
 import logging
@@ -46,20 +46,15 @@ CHANNEL_ID = creds.CHANNEL_ID
 ADMIN_CHANNEL_ID = creds.ADMIN_CHANNEL_ID
 
 # -------------------- DB Helpers --------------------
-def log_payment_to_dynamodb(user_id, username, file_name, extracted_data: dict):
+def log_payment_to_dynamodb(user_id, file_name, extracted_data: dict):
     table = dynamodb.Table('merxylab-payment')
     item = {
         "user_id": str(user_id),
-        "username": username or "N/A",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "file_name": file_name,
-        "transaction_no": extracted_data.get("Transaction No", ""),
-        "amount": extracted_data.get("Amount", ""),
-        "transaction_time": extracted_data.get("Transaction Time", ""),
-        "notes": extracted_data.get("Notes", "")
+        **extracted_data
     }
     table.put_item(Item=item)
-
 
 def mark_user_as_invited(user_id):
     table = dynamodb.Table('merxylab-invited_users')
@@ -74,7 +69,7 @@ def is_duplicate_transaction(transaction_no: str) -> bool:
     table = dynamodb.Table('merxylab-payment')
     try:
         response = table.scan(
-            FilterExpression=Attr('transaction_no').eq(transaction_no)
+            FilterExpression=Attr('Transaction No').eq(transaction_no)
         )
         return response['Count'] > 0
     except Exception as e:
@@ -142,12 +137,13 @@ async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📌 Available Commands:\n"
+        "📌 *Available Commands:*\n"
         "/start - Start chatting with the bot\n"
         "/pay - Payment instructions\n"
         "/payment_confirm - Confirm your payment\n"
         "/help - Show this help message\n"
-        "/end - End the session"
+        "/end - End the session",
+        parse_mode="Markdown"
     )
 
 async def end(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -212,116 +208,6 @@ def extract_payment_info(text: str) -> tuple[str, dict]:
     summary = "\n".join([f"*{key}:* `{value}`" for key, value in result.items()])
     return summary, result
 
-def clean_kbz_ocr_text(text: str) -> str:
-    pattern = r"(?i)ae\s*Thank you for using KBZPay!\s*The e-receipt only means you already paid for the\s*merchant\.?\s*You need to confirm the final transaction status\s*with merchant\.?"
-    cleaned_text = re.sub(pattern, "", text, flags=re.DOTALL).strip()
-    return cleaned_text
-
-
-def extract_text_from_image(image_path):
-    image = Image.open(image_path)
-    text = pytesseract.image_to_string(image, lang='eng')
-    if not re.search(r'[a-zA-Z]', text):
-        text = pytesseract.image_to_string(image, lang='mya')
-
-    # Clean garbage footer
-    text = clean_kbz_ocr_text(text)
-    print(text)
-    return text
-
-
-def extract_fields(text):
-    result = {
-        "time": None,
-        "transaction_id": None,
-        "amount": None,
-        "name": None,
-        "notes": None
-    }
-
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    # English format
-    eng_time = re.search(r'Transaction Time\s*([\d/]+ [\d:]+)', text)
-    eng_id = re.search(r'Transaction No\.?\s*(\d{16,20})', text)
-    eng_amount = re.search(r'Amount\s*(-?\d[\d,]*\.?\d*)\s*Ks', text)
-
-    if eng_time or eng_id or eng_amount:
-        if eng_time:
-            result["time"] = eng_time.group(1)
-        if eng_id:
-            result["transaction_id"] = eng_id.group(1)
-        if eng_amount:
-            amount = eng_amount.group(1).replace(',', '')
-            result["amount"] = f"{amount} Ks"
-
-        name_match = re.search(r'Transfer To\s*([A-Z][A-Za-z\s]+)\s*[\(<]?[*#]+(\d{4})[\)>]?', text)
-        if not name_match:
-            name_match = re.search(r'Transfer To\s*([A-Z][A-Za-z\s]+)\s*[*#]+\d{4}', text)
-        if name_match:
-            result["name"] = f"{name_match.group(1).strip()} ({name_match.group(2) if len(name_match.groups()) > 1 else name_match.group(1).split()[-1]})"
-
-        notes_match = re.search(r'Notes\s*([^\n]+?)(?=\s*(?:Transaction|Transfer|Amount|$))', text)
-        if notes_match:
-            result["notes"] = notes_match.group(1).strip()
-        else:
-            amount_pos = text.find('Amount') if 'Amount' in text else -1
-            if amount_pos > -1:
-                notes_part = text[amount_pos:].split('Ks')[-1].strip()
-                if notes_part and not any(x in notes_part for x in ['Transaction', 'Transfer']):
-                    result["notes"] = notes_part.split('\n')[0].strip()
-
-        return result
-
-    # Myanmar fallback
-    my_time = re.search(r'(\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})', text)
-    my_id = re.search(r'(\d{16,20})', text)
-    my_amount = re.search(r'(-?\d[\d,]*\.?\d*)\s*Ks', text)
-
-    if my_time or my_id or my_amount:
-        if my_time:
-            result["time"] = my_time.group(1)
-        if my_id:
-            result["transaction_id"] = my_id.group(1)
-        if my_amount:
-            amount = my_amount.group(1).replace(',', '')
-            result["amount"] = f"{amount} Ks"
-
-        name_match = re.search(r'([A-Z][A-Za-z\s]+)\s*[\(<]?[*#]+(\d{4})[\)>]?', text)
-        if not name_match:
-            name_match = re.search(r'([A-Z][A-Za-z\s]+)\s*[*#]+\d{4}', text)
-        if name_match:
-            result["name"] = f"{name_match.group(1).strip()} ({name_match.group(2) if len(name_match.groups()) > 1 else name_match.group(1).split()[-1]})"
-
-        amount_pos = text.find('Ks') if 'Ks' in text else -1
-        if amount_pos > -1:
-            notes_part = text[amount_pos+2:].strip()
-            if notes_part and not any(x in notes_part for x in ['Transaction', 'Transfer']):
-                result["notes"] = notes_part.split('\n')[0].strip()
-
-        return result
-
-    # Fallback
-    time_match = re.search(r'(\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})', text)
-    id_match = re.search(r'(\d{16,20})', text)
-    amount_match = re.search(r'(-?\d[\d,]*\.?\d*)\s*Ks', text)
-
-    if time_match:
-        result["time"] = time_match.group(1)
-    if id_match:
-        result["transaction_id"] = id_match.group(1)
-    if amount_match:
-        amount = amount_match.group(1).replace(',', '')
-        result["amount"] = f"{amount} Ks"
-
-    name_match = re.search(r'([A-Z][A-Za-z\s]+)\s*[\(<]?[*#]+(\d{4})[\)>]?', text)
-    if not name_match:
-        name_match = re.search(r'([A-Z][A-Za-z\s]+)\s*[*#]+\d{4}', text)
-    if name_match:
-        result["name"] = f"{name_match.group(1).strip()} ({name_match.group(2) if len(name_match.groups()) > 1 else name_match.group(1).split()[-1]})"
-
-    return result
-
 # -------------------- Image Handler --------------------
 async def handle_payment_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -333,12 +219,10 @@ async def handle_payment_image(update: Update, context: ContextTypes.DEFAULT_TYP
     await photo_file.download_to_drive(filename)
 
     try:
-        # OCR and extraction using new logic
-        extracted_text = extract_text_from_image(filename)
-        extracted_fields = extract_fields(extracted_text)
+        image = Image.open(filename)
+        extracted_text = pytesseract.image_to_string(image)
 
-        # Ensure required fields exist
-        if not extracted_fields["transaction_id"] or not extracted_fields["amount"]:
+        if not is_valid_kpay_text(extracted_text):
             await update.message.reply_text(
                 "⚠️ Couldn't extract valid payment details. Please make sure:\n\n"
                 "1. You're sending a screenshot from KBZPay History\n"
@@ -358,41 +242,9 @@ async def handle_payment_image(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return ConversationHandler.END
 
-        # ✅ Validate name and last 4 digits
-        expected_name = "U MIN KO NAING"
-        expected_last4 = "3307"
-        name_field = extracted_fields["name"] or ""
-        if expected_name not in name_field or expected_last4 not in name_field:
-            await update.message.reply_text(
-                "⚠️ Payment must be made from the registered KBZPay account:\n\n"
-                f"{expected_name} ({expected_last4})\n\n"
-                "Please double-check and try again /payment_confirm."
-            )
-            return ConversationHandler.END
+        summary, extracted_dict = extract_payment_info(extracted_text)
+        transaction_no = extracted_dict.get("Transaction No", "")
 
-        # ✅ Validate amount > 5000 Ks
-        amount_str = extracted_fields["amount"].replace("Ks", "").replace(",", "").strip()
-
-# Remove negative sign if present (e.g., "-700000 Ks" becomes "700000")
-        if amount_str.startswith('-'):
-            amount_str = amount_str[1:]
-
-        try:
-            amount_value = float(amount_str)
-            if amount_value <= 5000:
-                await update.message.reply_text(
-                    "⚠️ Payment amount must be more than 5000 Ks.\n"
-                    f"Your amount: {amount_value:.0f} Ks"
-                    "Try again with the right screenshot by clicking /payment_confirm"
-                )
-                return ConversationHandler.END
-        except ValueError:
-            await update.message.reply_text("⚠️ Could not interpret the amount properly.")
-            return ConversationHandler.END
-
-        transaction_no = extracted_fields["transaction_id"]
-
-        # ✅ Check for duplicate transaction
         if is_duplicate_transaction(transaction_no):
             await update.message.reply_text(
                 "⚠️ This transaction has already been used.\n\n"
@@ -400,31 +252,13 @@ async def handle_payment_image(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return ConversationHandler.END
 
-        # ✅ Upload image to S3
         s3.upload_file(filename, creds.BUCKET_NAME, f"payments/{filename}")
-
-        # ✅ Save to DynamoDB
-        log_payment_to_dynamodb(user_id, user.username, filename, {
-            "Transaction No": transaction_no,
-            "Amount": extracted_fields["amount"],
-            "Transaction Time": extracted_fields["time"],
-            "Notes": extracted_fields["notes"]
-        })
-
+        log_payment_to_dynamodb(user_id, filename, extracted_dict)
         mark_user_as_paid(user, transaction_no)
-
-        # ✅ Build reply summary
-        summary = (
-            f"*Transaction No:* `{transaction_no}`\n"
-            f"*Amount:* `{extracted_fields['amount']}`\n"
-            f"*Time:* `{extracted_fields['time']}`\n"
-            f"*Notes:* `{extracted_fields['notes'] or 'N/A'}`"
-        )
 
         await update.message.reply_text("✅ Payment successfully verified!")
         await update.message.reply_text(f"📟 *Payment Details:*\n{summary}", parse_mode="Markdown")
 
-        # ✅ Send invite link if not already sent
         if not has_user_been_invited(user_id):
             try:
                 invite_link = await context.bot.create_chat_invite_link(
@@ -444,18 +278,19 @@ async def handle_payment_image(update: Update, context: ContextTypes.DEFAULT_TYP
                     "Please contact support with your transaction number."
                 )
 
-        # ✅ Notify admin
         await context.bot.send_message(
             chat_id=ADMIN_CHANNEL_ID,
             text=(
-                f" *New Payment Confirmed!*\n\n"
-                f" *User:* `{user.full_name}` (`{user_id}`)\n"
-                f" *File:* `{filename}`\n"
-                f" *Amount:* `{extracted_fields['amount']}`\n"
-                f" *Time:* `{extracted_fields['time']}`\n"
-                f" *Transaction No:* `{transaction_no}`\n"
-                f" *Notes:* `{extracted_fields['notes'] or 'N/A'}`\n"
-                f" *Invite Sent:* `{has_user_been_invited(user_id)}`"
+                f"📥 *New Payment Confirmed!*\n\n"
+                f"👤 *User:* `{user.full_name}` (`{user_id}`)\n"
+                f"🖼️ *File:* `{filename}`\n"
+                f"💸 *Amount:* `{extracted_dict.get('Amount', 'Not Found')}`\n"
+                f"📆 *Time:* `{extracted_dict.get('Transaction Time', 'Not Found')}`\n"
+                f"🧾 *Transaction No:* `{extracted_dict.get('Transaction No', 'Not Found')}`\n"
+                f"🔁 *Type:* `{extracted_dict.get('Transaction Type', 'Not Found')}`\n"
+                f"➡️ *To:* `{extracted_dict.get('Transfer To', 'Not Found')}`\n"
+                f"📝 *Notes:* `{extracted_dict.get('Notes', 'Not Found')}`\n"
+                f"🔐 *Invite Sent:* `{has_user_been_invited(user_id)}`"
             ),
             parse_mode="Markdown"
         )
@@ -472,7 +307,6 @@ async def handle_payment_image(update: Update, context: ContextTypes.DEFAULT_TYP
             ),
             parse_mode="Markdown"
         )
-
     finally:
         if os.path.exists(filename):
             os.remove(filename)

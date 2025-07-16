@@ -211,22 +211,14 @@ def extract_payment_info(text: str) -> tuple[str, dict]:
             break
     summary = "\n".join([f"*{key}:* `{value}`" for key, value in result.items()])
     return summary, result
-
-def clean_kbz_ocr_text(text: str) -> str:
-    pattern = r"(?i)ae\s*Thank you for using KBZPay!\s*The e-receipt only means you already paid for the\s*merchant\.?\s*You need to confirm the final transaction status\s*with merchant\.?"
-    cleaned_text = re.sub(pattern, "", text, flags=re.DOTALL).strip()
-    return cleaned_text
-
-
 def extract_text_from_image(image_path):
     image = Image.open(image_path)
+    
+    # Try English first
     text = pytesseract.image_to_string(image, lang='eng')
-    if not re.search(r'[a-zA-Z]', text):
+    if not re.search(r'[a-zA-Z]', text):  # If no English text detected
         text = pytesseract.image_to_string(image, lang='mya')
-
-    # Clean garbage footer
-    text = clean_kbz_ocr_text(text)
-    print(text)
+    
     return text
 
 
